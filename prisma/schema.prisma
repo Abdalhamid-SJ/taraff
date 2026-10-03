@@ -1,0 +1,219 @@
+generator client {
+  provider      = "prisma-client-js"
+  // "native" covers local Windows dev; the rest cover the common Linux
+  // flavors shared hosts run, so the right query-engine binary is already
+  // present even if node_modules is uploaded as-is rather than npm-installed
+  // on the server itself (Prisma's binary is platform-specific).
+  binaryTargets = ["native", "debian-openssl-3.0.x", "linux-musl-openssl-3.0.x", "rhel-openssl-3.0.x"]
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// Core catalogue
+model Category {
+  id        String    @id @default(cuid())
+  nameEn    String
+  nameAr    String
+  slug      String    @unique
+  sortOrder Int       @default(0)
+  isActive  Boolean   @default(true)
+  services  Service[]
+}
+
+model Service {
+  id          String              @id @default(cuid())
+  categoryId  String
+  category    Category            @relation(fields: [categoryId], references: [id])
+  nameEn      String
+  nameAr      String
+  descEn      String?
+  descAr      String?
+  slug        String              @unique
+  imageUrl    String?
+  sortOrder   Int                 @default(0)
+  isActive    Boolean             @default(true)
+  variants    ServiceVariant[]
+  beauticians BeauticianService[]
+}
+
+// Tiered pricing: every service has 1+ variants (S / M / L, Short / Medium / Long hair, etc.)
+model ServiceVariant {
+  id              String  @id @default(cuid())
+  serviceId       String
+  service         Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  labelEn         String // "Short hair"
+  labelAr         String // "شعر قصير"
+  priceAed        Decimal @db.Decimal(10, 2)
+  durationMinutes Int
+  sortOrder       Int     @default(0)
+  isActive        Boolean @default(true)
+
+  bookingItems BookingItem[]
+}
+
+// Staff
+model Beautician {
+  id           String              @id @default(cuid())
+  fullName     String
+  phone        String
+  photoUrl     String?
+  isActive     Boolean             @default(true)
+  skills       BeauticianService[] // which services she can perform
+  areas        BeauticianArea[] // where she works
+  availability Availability[] // weekly recurring hours
+  timeOff      TimeOff[] // one-off blocks
+  bookings     Booking[]
+}
+
+model BeauticianService {
+  beauticianId String
+  beautician   Beautician @relation(fields: [beauticianId], references: [id], onDelete: Cascade)
+  serviceId    String
+  service      Service    @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+
+  @@id([beauticianId, serviceId])
+}
+
+// Geography — flat list, seeded, admin-editable
+model Area {
+  id       String  @id @default(cuid())
+  // Legacy pick-list: customers now type their area in freehand (Booking.areaText).
+  // Still used for the home page "where we serve" list and for old bookings.
+  emirate  String // Saudi region, e.g. Riyadh, Makkah, Eastern Province (field name kept as-is post-rebrand — see seed.ts)
+  nameEn   String
+  nameAr   String
+  isActive Boolean @default(true)
+
+  beauticians BeauticianArea[]
+  bookings    Booking[]
+}
+
+model BeauticianArea {
+  beauticianId String
+  beautician   Beautician @relation(fields: [beauticianId], references: [id], onDelete: Cascade)
+  areaId       String
+  area         Area       @relation(fields: [areaId], references: [id], onDelete: Cascade)
+
+  @@id([beauticianId, areaId])
+}
+
+model Availability {
+  id           String     @id @default(cuid())
+  beauticianId String
+  beautician   Beautician @relation(fields: [beauticianId], references: [id], onDelete: Cascade)
+  dayOfWeek    Int // 0 = Sunday
+  startMinute  Int // minutes from midnight, e.g. 600 = 10:00
+  endMinute    Int
+}
+
+model TimeOff {
+  id           String     @id @default(cuid())
+  beauticianId String
+  beautician   Beautician @relation(fields: [beauticianId], references: [id], onDelete: Cascade)
+  startsAt     DateTime
+  endsAt       DateTime
+  reason       String?
+}
+
+// Bookings
+model Booking {
+  id        String        @id @default(cuid())
+  reference String        @unique // e.g. "BK-7F3K2Q" — shown to customer
+  status    BookingStatus @default(PENDING)
+
+  customerName    String
+  customerPhone   String
+  // Set when the booking was made while signed in to a customer account;
+  // null for guest checkout. Drives the "My account" booking history.
+  customerId      String?
+  customer        Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  // The customer types their area/neighbourhood in. `areaId` is the legacy
+  // pick-list reference: kept nullable so bookings made before the switch
+  // still resolve, but never written for new bookings.
+  areaText        String    @default("")
+  areaId          String?
+  area            Area?     @relation(fields: [areaId], references: [id])
+  addressText     String // free text — building, flat, landmark
+  addressNotes    String?
+  addressVerified Boolean   @default(false) // admin ticks after calling
+
+  scheduledStart DateTime
+  scheduledEnd   DateTime // start + total duration + travel buffer
+  beauticianId   String? // null until assigned
+  beautician     Beautician? @relation(fields: [beauticianId], references: [id])
+  assignedBy     AssignMode  @default(AUTO)
+
+  items       BookingItem[]
+  subtotalAed Decimal       @db.Decimal(10, 2)
+  totalAed    Decimal       @db.Decimal(10, 2)
+
+  adminNotes     String?
+  cancelReason   String?
+  // §7: notification failures must not fail the booking, but must surface as
+  // a dashboard badge — this is the only way to know which booking's alert
+  // needs a manual follow-up. Not in §3's literal schema; added because §7
+  // explicitly requires it and the given schema has no other way to track it.
+  notifyFailedAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([customerId])
+}
+
+model BookingItem {
+  id              String         @id @default(cuid())
+  bookingId       String
+  booking         Booking        @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  variantId       String
+  variant         ServiceVariant @relation(fields: [variantId], references: [id])
+  // Snapshot at time of booking — never join to live prices for historical bookings
+  serviceNameEn   String
+  serviceNameAr   String
+  variantLabelEn  String
+  variantLabelAr  String
+  priceAed        Decimal        @db.Decimal(10, 2)
+  durationMinutes Int
+  quantity        Int            @default(1)
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  ON_THE_WAY
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+enum AssignMode {
+  AUTO
+  ADMIN
+}
+
+// Customer accounts (phone + password). Optional: guest checkout still works,
+// an account just gives the customer a booking history and pre-filled details.
+model Customer {
+  id           String    @id @default(cuid())
+  name         String
+  phone        String    @unique // normalised +966… — same format as Booking.customerPhone
+  passwordHash String
+  createdAt    DateTime  @default(now())
+  bookings     Booking[]
+}
+
+model AdminUser {
+  id           String @id @default(cuid())
+  email        String @unique
+  passwordHash String
+  name         String
+  role         String @default("ADMIN") // ADMIN | STAFF
+}
+
+model Setting {
+  key   String @id
+  value String // JSON
+}
