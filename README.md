@@ -346,6 +346,8 @@ WHATSAPP_PHONE_NUMBER_ID=
 WHATSAPP_ACCESS_TOKEN=
 WHATSAPP_TEMPLATE_NAME=
 RESEND_API_KEY=
+NOTIFY_EMAIL_TO=                 # who receives booking emails (falls back to ADMIN_SEED_EMAIL)
+NOTIFY_EMAIL_FROM=               # sender on a Resend-verified domain, e.g. "Taraf Bookings <bookings@tarafsaloon.com>"
 BLOB_READ_WRITE_TOKEN=
 ```
 
